@@ -273,7 +273,26 @@ def compute_loss(X_true, X_pred, mask):
 
     '''
     mse = []
-    for i in range(X.shape[0]):
+    for i in range(X_true.shape[0]):
         if mask[i]:
             mse.append(metrics.mean_squared_error(X_true[i], X_pred[i]))
     return mse
+
+
+
+
+def preprocess(adj):
+    '''Preprocess the input adjacency matrix
+
+    Parameters
+    ----------
+    adj : numpy array
+        adjacency matrix.
+
+    Returns
+    -------
+    adj : numpy array
+        preprocessed adj matrix.
+
+    '''
+    return GCNConv.preprocess(adj).astype('f4')
