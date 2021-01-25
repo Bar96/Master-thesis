@@ -336,7 +336,7 @@ def build_shared_graph(network):
         if len(graph[i]) < max_lenght:
             while len(graph[i]) < max_lenght:
                 graph[i].append([-1, -1])
-    
+
     graph_np = np.array(graph).astype(np.float32)
     graph = None
     
@@ -410,13 +410,18 @@ def biased_random_walks(graph_shape, starts, walk_length, p, q, results_list, in
     walks = []
     for n, starting_node in enumerate(starts):
         walk = []
-        walk.append(starting_node)
+        
+        if shared_graph[starting_node][0][0] == -1:
+            walks.append(['-1' for m in range(walk_length)])
+            continue
+        
+        walk.append(str(starting_node))
         
         #compute the distribution of the first node
         #since there is no previous node at the start, p and q are't used
         unnormalized_probs = []
         i = 0
-        while shared_graph[starting_node][i][0] > -1: #the graph is padded with -1
+        while i < shared_graph[starting_node].shape[0] and shared_graph[starting_node][i][0] > -1: #the graph is padded with -1
             unnormalized_probs.append(shared_graph[starting_node][i][1])
             i+=1
         sum_tot = sum(unnormalized_probs)
@@ -428,12 +433,12 @@ def biased_random_walks(graph_shape, starts, walk_length, p, q, results_list, in
         for i, prob in enumerate(probs):
             curr_sum += prob
             if rand < curr_sum:
-                walk.append(int(shared_graph[starting_node][i][0]))
+                walk.append(str(int(shared_graph[starting_node][i][0])))
                 break
         
         while len(walk) < walk_length:
-            curr_node = walk[-1]
-            prev_node = walk[-2]
+            curr_node = int(walk[-1])
+            prev_node = int(walk[-2])
     
             #compute the distribution of the current node
             unnormalized_probs = []  
@@ -455,7 +460,7 @@ def biased_random_walks(graph_shape, starts, walk_length, p, q, results_list, in
             for i, prob in enumerate(unnormalized_probs):
                 curr_sum += prob / sum_tot
                 if rand < curr_sum:
-                    walk.append(int(shared_graph[curr_node][i][0]))
+                    walk.append(str(int(shared_graph[curr_node][i][0])))
                     break
           
         walks.append(walk)
@@ -642,3 +647,176 @@ def sequential_biased_random_walks(net, walk_per_node=10,
             print(str(starting_node)+'/'+str(len(network)))
 
     return walks
+
+
+
+
+def compute_alias_edges(network, neighbors, prev, curr, p, q):
+    '''Compute the alias table of the current node given the previous
+    node of the walk and the parameters p and q
+
+    Parameters
+    ----------
+    network : numpy array
+        adjacency matrix of the network.
+    neighbors : list
+        list where the element i is the list of neighbors 
+        of node i.
+    prev : integer
+        previus node of the wlak.
+    curr : integer
+        current node of the walk.
+    p : float
+        p paramater.
+    q : float
+        q parameter.
+
+    Returns
+    -------
+    alias, q
+        alias table and probability table.
+
+    '''
+    unnormalized_probs = []
+    
+    for n in neighbors[curr]:
+        if n == prev:
+            unnormalized_probs.append((network[curr][n])/p)
+        elif network[n][prev] > 0:
+            unnormalized_probs.append(network[curr][n])
+        else:
+            unnormalized_probs.append((network[curr][n])/q)
+            
+    probs_sum = sum(unnormalized_probs)
+    probs = [float(k)/probs_sum for k in unnormalized_probs]
+    return build_alias_table(probs)
+
+
+
+
+def preprocess_biased(network, p, q, verbose=False):
+    '''For each node of the network compute the list of its neighbors and 
+    the alias table. For each edge compute the alias table using one vertex
+    as previous node and the other one as current node
+
+    Parameters
+    ----------
+    network : numpy array
+        adjacency matrix of the network.
+    p : float
+        p parameter.
+    q : floar
+        q paramter.
+    verbose : boolean, optional
+        print the passages. The default is False.
+
+    Returns
+    -------
+    neighbors : list 
+        list where each element is the list of neighbors of the corresponding node.
+    alias_tables : list
+        list where each element contains the probabilities and the alias tables
+        of the corresponding node.
+    edges_alias_tables: dictionary
+        ddictionary with edges as keys and the corresponding probabilites 
+        and alias tables as values
+
+    '''
+    neighbors = [] 
+    alias_tables = []
+    edges = []
+    for i in range(network.shape[0]):
+        line = [] #list to store the indices of the neighbors of node i 
+        unnormalized_probs = []
+        for j in range(network.shape[0]):
+            if network[i][j] > 0:
+                line.append(j)
+                unnormalized_probs.append(network[i][j])
+                edges.append([i, j])
+        neighbors.append(line)
+        
+        #normalize the probabilities between 0 and 1
+        line_sum = sum(unnormalized_probs)
+        if line_sum != 0:
+            probs = [p/line_sum for p in unnormalized_probs]
+        else:
+            probs = [] #the node is isolated
+        alias_tables.append(build_alias_table(probs))
+        
+        if i % 500 == 0 and verbose:
+            print('preprocessing: '+str(i)+'/'+str(network.shape[0]))
+            
+    edges_alias_tables = {}
+    for k, edge in enumerate(edges):
+        edges_alias_tables[(edge[0], edge[1])] = compute_alias_edges(network, neighbors, edge[0], edge[1], p, q)
+        if i % 5000 == 0 and verbose:
+            print('preprocessing: '+str(k)+'/'+str(len(edges)))
+    
+    network = None
+    return neighbors, alias_tables, edges_alias_tables
+
+
+
+    
+def biased_random_walks_small(network, p=1, q=1, walk_length=5, walk_per_node=5, seed=None, verbose=False):
+    '''Compute biased random walks using the alias method. This
+    function works only for small networks
+
+    Parameters
+    ----------
+    network : numpy array
+        adjacency matrix of the network.
+    p : float, optional
+        p parameter. The default is 1.
+    q : float, optional
+        q parameter. The default is 1.
+    walk_length : integer, optional
+        lenght of the walks. The default is 5.
+    walk_per_node : integer, optional
+        walk per node. The default is 5.
+    seed : integer, optional
+        random seed. The default is None.
+    verbose : boolean, optional
+        flag to print the results. The default is False.
+
+    Returns
+    -------
+    walks : list
+        list where each element is a random walks.
+
+    '''
+    if seed != None:
+        random.seed(seed)
+    else:
+        random.seed()
+        
+    num_nodes = network.shape[0]
+    
+    neighbors, alias_tables, edges_alias_tables = preprocess_biased(network, p, q, verbose)
+    network = None #the network is no more needed
+    walks = []
+    
+    for h in range(num_nodes):
+        for n in range(walk_per_node):
+            if not len(neighbors[h]) > 0: #the node has no neighbors
+                #use a list of -1 when it's not possible to compute the walk
+                walks.append(['-1' for i in range(walk_length)]) 
+                continue
+            
+            walk = []   
+            walk.append(str(h))
+            
+            index = get_next_node(alias_tables[h][0], alias_tables[h][1])
+            walk.append(str(neighbors[h][index]))
+        
+            while len(walk) < walk_length:
+                curr_node = int(walk[-1])
+                prev_node = int(walk[-2])
+                index = get_next_node(edges_alias_tables[(prev_node, curr_node)][0], 
+                                      edges_alias_tables[(prev_node, curr_node)][1])
+                walk.append(str(neighbors[curr_node][index]))
+            walks.append(walk)
+        if h % 1000 == 0:
+            print(str(h)+'/'+str(num_nodes))
+        
+    return walks 
